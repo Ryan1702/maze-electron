@@ -1,0 +1,87 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #1a1a1a;
+  color: #eee;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+#container {
+  text-align: center;
+  padding: 12px;
+}
+
+h1 {
+  font-size: 24px;
+  margin-bottom: 10px;
+  color: #ffd700;
+  letter-spacing: 4px;
+  text-shadow: 0 0 10px rgba(255, 215, 0, 0.3);
+}
+
+#info-bar {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+#info-bar span {
+  font-size: 16px;
+  background: #2a2a2a;
+  padding: 6px 16px;
+  border-radius: 8px;
+  border: 1px solid #444;
+}
+
+#new-game-btn {
+  font-size: 15px;
+  padding: 8px 22px;
+  border: 2px solid #ffd700;
+  border-radius: 8px;
+  background: #2a2a2a;
+  color: #ffd700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: bold;
+}
+
+#new-game-btn:hover {
+  background: #ffd700;
+  color: #1a1a1a;
+  transform: scale(1.05);
+  box-shadow: 0 0 12px rgba(255, 215, 0, 0.5);
+}
+
+#new-game-btn:active {
+  transform: scale(0.97);
+}
+
+#mazeCanvas {
+  border: 2px solid #fff;
+  display: block;
+  margin: 0 auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+#controls-hint {
+  margin-top: 8px;
+  color: #888;
+  font-size: 13px;
+}
+
+#controls-hint p {
+  margin: 0;
+}
