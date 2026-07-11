@@ -302,15 +302,19 @@ function victory() {
   gameOver = true;
   stopTimer();
 
+  // 先绘制最后一帧，让玩家看到自己站在终点
+  drawMaze();
+
   const mins = Math.floor(timerSeconds / 60);
   const secs = timerSeconds % 60;
   const timeStr = `${mins} 分 ${secs} 秒`;
 
-  // 弹窗后自动重置
-  alert(`恭喜！你用了 ${timeStr}，共 ${steps} 步。`);
-
-  // 自动重新开始
-  newGame();
+  // 延迟弹窗，确保浏览器完成最后一帧渲染
+  requestAnimationFrame(() => {
+    alert(`恭喜！你用了 ${timeStr}，共 ${steps} 步。`);
+    // 自动重新开始
+    newGame();
+  });
 }
 
 // ============================================================
@@ -325,6 +329,12 @@ function newGame() {
   playerX = 1;
   playerY = 1;
   lastMoveTime = 0;
+
+  // 清空所有残留按键状态，防止上一局弹窗期间
+  // keyup 事件被吞掉导致新游戏自动沿残留方向移动
+  for (const key in keysPressed) {
+    delete keysPressed[key];
+  }
 
   maze = generateMaze();
   updateDisplay();
@@ -353,9 +363,7 @@ function gameLoop() {
     lastMoveTime = now;
   }
 
-  if (!gameOver) {
-    drawMaze();
-  }
+  drawMaze();
 }
 
 // ============================================================
