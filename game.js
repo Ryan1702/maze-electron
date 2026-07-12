@@ -5,7 +5,6 @@ const MAZE_SIZE = 41;       // 必须是奇数
 const CELL_SIZE = 15;       // 每格像素大小
 const FOG_RADIUS = 3;       // 视野半径（曼哈顿距离）
 const MOVE_COOLDOWN = 120;  // 移动冷却时间（毫秒）
-const EXTRA_OPEN_RATIO = 0.05; // 额外打通墙壁比例
 
 // ============================================================
 // DOM 元素引用
@@ -34,97 +33,369 @@ let lastMoveTime = 0;
 let gameLoopId = null;
 
 // ============================================================
-// 迷宫生成：迭代 DFS（递归回溯），使用栈实现完美迷宫
+// 迷宫生成：两步法 — 散布主路径 + 疯狂分叉
+//
+// 核心迷惑设计（从玩家心理角度）：
+//   - 起点到终点有且只有一条正确路径（完美迷宫，无环路）
+//   - 主路径短（占内部总格子 15%~20%），但像藤蔓蜿蜒散布全图
+//   - 主路径间隙中塞满蜿蜒死胡同，几乎每走一两步就遇到分叉
+//   - 每个分叉口正确方向随机（时而远离终点、时而靠近终点）
+//   - 死胡同内部也曲折，不会一眼望穿
+//
+// 第一步：区块引导 + 交替偏好 → 主路径均匀散布
+//   - 把迷宫分成 4×4 区块（每块约 10×10 格）
+//   - 优先选访问次数最少的区块，将主路径"推"向未涉足区域
+//   - 每 4~8 步切换远离/靠近终点偏好，各 50%，不连续两次相同
+//   - 接近 maxSteps 时放弃区块均匀，尽快导向终点
+//
+// 第二步：从主路径每个点疯狂分叉
+//   - 主路径所有格子随机打乱全压入栈
+//   - 标准递归回溯填充所有剩余格子
+//   - 80% 概率沿当前方向继续延伸，20% 强制垂直转弯
+//   - 死胡同内部蜿蜒曲折，填满主路径间隙
 // ============================================================
-function generatePerfectMaze() {
+
+// 四个跳两格方向（dx, dy 均为 ±2，中间格同步打通）
+const DIRS = [
+  { dx: 0, dy: -2, key: 'up' },
+  { dx: 0, dy: 2,  key: 'down' },
+  { dx: -2, dy: 0, key: 'left' },
+  { dx: 2, dy: 0,  key: 'right' },
+];
+
+const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' };
+
+// ============================================================
+// 工具：计算格子所属区块（4×4 均匀划分内部 39×39 区域）
+// 每块约 10×10 格，用于区块均匀散布策略
+// ============================================================
+function getZone(x, y) {
+  const zoneW = Math.ceil(39 / 4);  // 10
+  const zoneH = Math.ceil(39 / 4);  // 10
+  const zx = Math.min(Math.floor((x - 1) / zoneW), 3);
+  const zy = Math.min(Math.floor((y - 1) / zoneH), 3);
+  return zy * 4 + zx;
+}
+
+// ============================================================
+// 工具：Fisher-Yates 洗牌（用于随机打乱主路径点顺序）
+// ============================================================
+function shuffle(arr) {
+  const a = arr.slice();  // 浅拷贝，不修改原数组
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// ============================================================
+// 第一步：生成散布全图的短主路径
+//
+// 使用区块均匀策略 + 交替偏好，让主路径像细长藤蔓贯穿全图。
+// 主路径目标长度：60~80步（内部奇数格的15%~20%）。
+// 阶段1：区块引导游走 ~55步，散布到8+区块
+// 阶段2：贪心导向终点（不回退），最终长度60~95
+//
+// 参数：
+//   m       - 当前迷宫（全墙初始化），会被原地修改
+//   visited - 空 Set，记录主路径已访问的奇数格 key "x,y"
+// 返回：主路径点数组 [{x, y}, ...]
+// ============================================================
+function generateMainPath(m, visited) {
+  const GOAL_X = 39;
+  const GOAL_Y = 39;
+  const TOTAL_ODD = 400;
+  const PHASE1_TARGET = 55;     // 阶段1目标步数（区块散布）
+  const MAX_TOTAL = 95;         // 主路径总长度上限
+
+  // 区块访问计数（16个区块，0~15）
+  const zoneVisits = new Array(16).fill(0);
+
+  const mainPath = [];
+
+  // 起点初始化
+  m[1][1] = 0;
+  visited.add('1,1');
+  zoneVisits[getZone(1, 1)]++;
+  mainPath.push({ x: 1, y: 1 });
+
+  // 交替偏好状态：true=靠近终点，false=远离终点
+  // 阶段1期间使用远离偏好主导（60%远离，40%靠近），让路径绕远散布
+  let preferToward = Math.random() < 0.4;  // 40%靠近
+  let stepsSinceSwitch = 0;
+  let switchThreshold = 4 + Math.floor(Math.random() * 5);
+
+  // ========== 阶段1：区块引导游走 ==========
+  // 使用显式栈，DFS风格，优先未探索区块，长度控制在 PHASE1_TARGET
+  const stack = [{ x: 1, y: 1 }];
+
+  while (stack.length > 0 && mainPath.length < PHASE1_TARGET) {
+    const cur = stack[stack.length - 1];
+
+    const raw = [];
+    for (const d of DIRS) {
+      const nx = cur.x + d.dx;
+      const ny = cur.y + d.dy;
+      if (
+        nx >= 1 && nx <= 39 &&
+        ny >= 1 && ny <= 39 &&
+        !visited.has(`${nx},${ny}`)
+      ) {
+        const mx = cur.x + d.dx / 2;
+        const my = cur.y + d.dy / 2;
+        raw.push({ nx, ny, mx, my, dir: d.key });
+      }
+    }
+
+    if (raw.length === 0) {
+      stack.pop();
+      continue;
+    }
+
+    // 计算每个候选的区块和距离
+    const augmented = raw.map(c => ({
+      ...c,
+      zone: getZone(c.nx, c.ny),
+      dist: Math.abs(c.nx - GOAL_X) + Math.abs(c.ny - GOAL_Y),
+    }));
+
+    // 综合打分：区块均匀（权重6）+ 远近偏好（权重3）
+    const scored = augmented.map(c => {
+      const allZones = augmented.map(cc => zoneVisits[cc.zone]);
+      const zMin = Math.min(...allZones);
+      const zMax = Math.max(...allZones);
+      const zRng = (zMax - zMin) || 1;
+      const zScore = (zMax - zoneVisits[c.zone]) / zRng;
+      const zPart = zScore * 6.0;
+
+      const allDists = augmented.map(cc => cc.dist);
+      const dMin = Math.min(...allDists);
+      const dMax = Math.max(...allDists);
+      const dRng = (dMax - dMin) || 1;
+      const dNorm = preferToward ? (dMax - c.dist) / dRng : (c.dist - dMin) / dRng;
+      const dPart = dNorm * 3.0;
+
+      const noise = (Math.random() - 0.5) * 1.0;
+      return { ...c, score: zPart + dPart + noise };
+    });
+
+    // 加权随机选择
+    const weights = scored.map(s => Math.exp(Math.max(s.score, -20) * 0.7));
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let roll = Math.random() * totalWeight;
+    let chosen;
+    for (let i = 0; i < scored.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) { chosen = scored[i]; break; }
+    }
+    if (!chosen) chosen = scored[scored.length - 1];
+
+    // 打通
+    m[chosen.my][chosen.mx] = 0;
+    m[chosen.ny][chosen.nx] = 0;
+    visited.add(`${chosen.nx},${chosen.ny}`);
+    zoneVisits[chosen.zone]++;
+    mainPath.push({ x: chosen.nx, y: chosen.ny });
+    stack.push({ x: chosen.nx, y: chosen.ny });
+
+    // 交替偏好切换
+    stepsSinceSwitch++;
+    if (stepsSinceSwitch >= switchThreshold) {
+      const oldPref = preferToward;
+      // 阶段1：60%远离，40%靠近
+      preferToward = Math.random() < 0.4;
+      if (preferToward === oldPref && augmented.length > 1) {
+        preferToward = !oldPref;
+      }
+      stepsSinceSwitch = 0;
+      switchThreshold = 4 + Math.floor(Math.random() * 5);
+    }
+  }
+
+  // ========== 阶段2：贪心导向终点 ==========
+  // 从当前主路径末端，纯贪心（选距离终点最近的未访问邻居）走向终点
+  // 不回退，不回溯，确保最终长度在可控范围内
+  let cur = mainPath[mainPath.length - 1];
+  while (cur.x !== GOAL_X || cur.y !== GOAL_Y) {
+    const raw = [];
+    for (const d of DIRS) {
+      const nx = cur.x + d.dx;
+      const ny = cur.y + d.dy;
+      if (
+        nx >= 1 && nx <= 39 &&
+        ny >= 1 && ny <= 39 &&
+        !visited.has(`${nx},${ny}`)
+      ) {
+        const mx = cur.x + d.dx / 2;
+        const my = cur.y + d.dy / 2;
+        raw.push({ nx, ny, mx, my, dist: Math.abs(nx - GOAL_X) + Math.abs(ny - GOAL_Y) });
+      }
+    }
+
+    if (raw.length === 0) {
+      // 被困住：沿主路径回溯找到出路
+      let found = false;
+      for (let idx = mainPath.length - 2; idx >= 0; idx--) {
+        const pt = mainPath[idx];
+        for (const d of DIRS) {
+          const nx = pt.x + d.dx;
+          const ny = pt.y + d.dy;
+          if (nx >= 1 && nx <= 39 && ny >= 1 && ny <= 39 && !visited.has(`${nx},${ny}`)) {
+            // 从这个回溯点重新贪心走向终点
+            cur = pt;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+      if (!found) break;  // 完全无路（极罕见）
+      continue;
+    }
+
+    // 贪心：选距离终点最近的
+    let best = raw[0];
+    for (let i = 1; i < raw.length; i++) {
+      if (raw[i].dist < best.dist) best = raw[i];
+    }
+
+    m[best.my][best.mx] = 0;
+    m[best.ny][best.nx] = 0;
+    visited.add(`${best.nx},${best.ny}`);
+    mainPath.push({ x: best.nx, y: best.ny });
+    cur = { x: best.nx, y: best.ny };
+  }
+
+  return mainPath;
+}
+
+// ============================================================
+// 第二步：从主路径每个点疯狂分叉，填满所有剩余格子
+//
+// 主路径每个格子都作为分支种子，随机打乱全部压入栈。
+// 标准递归回溯填充，80% 沿当前方向延伸、20% 垂直转弯，
+// 让死胡同内部也蜿蜒曲折。
+//
+// 参数：
+//   m              - 已有主路径的迷宫，会被原地修改填满分叉
+//   visited        - 已含主路径点的 Set，会被扩展
+//   mainPathPoints - 主路径点数组
+// ============================================================
+function generateBranches(m, visited, mainPathPoints) {
+  // 记录每个已访问格子的"来向"（进入方向 key），用于蜿蜒延伸策略
+  const parentDir = {};  // key "x,y" → 'up'|'down'|'left'|'right'
+
+  // 从主路径相邻关系推断来向
+  for (let i = 1; i < mainPathPoints.length; i++) {
+    const prev = mainPathPoints[i - 1];
+    const cur = mainPathPoints[i];
+    const dx = cur.x - prev.x;
+    const dy = cur.y - prev.y;
+    let dirKey = null;
+    if (dy === -2) dirKey = 'up';
+    else if (dy === 2) dirKey = 'down';
+    else if (dx === -2) dirKey = 'left';
+    else if (dx === 2) dirKey = 'right';
+    if (dirKey) {
+      parentDir[`${cur.x},${cur.y}`] = dirKey;
+    }
+  }
+
+  // 主路径所有点随机打乱，全部压入栈
+  const stack = shuffle(mainPathPoints);
+
+  // 标准递归回溯：栈顶 peek，有邻居则延伸，无邻居则弹出
+  while (stack.length > 0) {
+    const cur = stack[stack.length - 1];  // peek 栈顶
+    const key = `${cur.x},${cur.y}`;
+    const prevDir = parentDir[key] || null;
+
+    // 收集未访问的跳两格邻居
+    const raw = [];
+    for (const d of DIRS) {
+      const nx = cur.x + d.dx;
+      const ny = cur.y + d.dy;
+      if (
+        nx >= 1 && nx <= 39 &&
+        ny >= 1 && ny <= 39 &&
+        !visited.has(`${nx},${ny}`)
+      ) {
+        const mx = cur.x + d.dx / 2;
+        const my = cur.y + d.dy / 2;
+        raw.push({ nx, ny, mx, my, dir: d.key });
+      }
+    }
+
+    if (raw.length === 0) {
+      // 无未访问邻居 → 回溯
+      stack.pop();
+      continue;
+    }
+
+    // ---- 蜿蜒策略：80% 沿当前方向继续，20% 强制垂直转弯 ----
+    let candidates = raw;
+
+    if (prevDir && raw.length > 1 && Math.random() < 0.8) {
+      // 80%：优先同向延伸（让死胡同内部连续蜿蜒）
+      const sameDir = raw.filter(c => c.dir === prevDir);
+      if (sameDir.length > 0) {
+        candidates = sameDir;
+      }
+    } else if (prevDir && raw.length > 1) {
+      // 20%：强制垂直转弯
+      const perpendicular = raw.filter(c => {
+        const isVertical =
+          (prevDir === 'up' || prevDir === 'down') && (c.dir === 'left' || c.dir === 'right');
+        const isHorizontal =
+          (prevDir === 'left' || prevDir === 'right') && (c.dir === 'up' || c.dir === 'down');
+        return isVertical || isHorizontal;
+      });
+      if (perpendicular.length > 0) {
+        candidates = perpendicular;
+      }
+    }
+
+    // 在候选集合中随机选一个
+    const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+
+    // 打通中间墙 + 目标格
+    m[chosen.my][chosen.mx] = 0;
+    m[chosen.ny][chosen.nx] = 0;
+    visited.add(`${chosen.nx},${chosen.ny}`);
+    parentDir[`${chosen.nx},${chosen.ny}`] = chosen.dir;
+
+    // 压入新格子
+    stack.push({ x: chosen.nx, y: chosen.ny });
+  }
+
+  // 确保终点是通道（分支填充可能覆盖不到）
+  m[39][39] = 0;
+}
+
+// ============================================================
+// 生成完整迷宫（两步法入口）
+// 返回 MAZE_SIZE × MAZE_SIZE 的二维数组，0=通道，1=墙壁
+// ============================================================
+function generateMaze() {
   // 初始化为全墙
   const m = [];
   for (let y = 0; y < MAZE_SIZE; y++) {
     m[y] = new Array(MAZE_SIZE).fill(1);
   }
 
-  // 起点设为通道
-  m[1][1] = 0;
+  const visited = new Set();  // 记录已访问的奇数格 key "x,y"
 
-  // 使用栈实现迭代 DFS
-  const stack = [];
-  stack.push({ x: 1, y: 1 });
+  // 第一步：生成散布全图的短主路径（占 15%~20%）
+  const mainPath = generateMainPath(m, visited);
 
-  // 四个方向：上、右、下、左（每一步跳两格，中间格也打通）
-  const dirs = [
-    { dx: 0, dy: -2 },
-    { dx: 2, dy: 0 },
-    { dx: 0, dy: 2 },
-    { dx: -2, dy: 0 },
-  ];
+  // 第二步：从主路径每个点疯狂分叉，填满所有剩余格子
+  generateBranches(m, visited, mainPath);
 
-  while (stack.length > 0) {
-    const current = stack[stack.length - 1];
-    const { x, y } = current;
-
-    // 收集未访问的邻居（目标格在迷宫范围内且仍是墙壁）
-    const neighbors = [];
-    for (const d of dirs) {
-      const nx = x + d.dx;
-      const ny = y + d.dy;
-      if (nx >= 1 && nx < MAZE_SIZE && ny >= 1 && ny < MAZE_SIZE && m[ny][nx] === 1) {
-        neighbors.push({ nx, ny, mx: x + d.dx / 2, my: y + d.dy / 2 });
-      }
-    }
-
-    if (neighbors.length > 0) {
-      // 随机选择一个未访问邻居
-      const chosen = neighbors[Math.floor(Math.random() * neighbors.length)];
-      // 打通中间墙壁和目标格
-      m[chosen.my][chosen.mx] = 0;
-      m[chosen.ny][chosen.nx] = 0;
-      stack.push({ x: chosen.nx, y: chosen.ny });
-    } else {
-      // 无未访问邻居，回溯
-      stack.pop();
-    }
-  }
-
-  return m;
-}
-
-// ============================================================
-// 随机打通额外墙壁（约 5% 的内墙），创建环路
-// ============================================================
-function addExtraPassages(m) {
-  // 收集所有内部墙壁（不包括外边界）
-  const innerWalls = [];
-  for (let y = 1; y < MAZE_SIZE - 1; y++) {
-    for (let x = 1; x < MAZE_SIZE - 1; x++) {
-      if (m[y][x] === 1) {
-        // 确认不是边界墙壁
-        innerWalls.push({ x, y });
-      }
-    }
-  }
-
-  // 随机打掉约 5% 的内墙
-  const count = Math.floor(innerWalls.length * EXTRA_OPEN_RATIO);
-  // Fisher-Yates 部分洗牌，选前 count 个
-  for (let i = 0; i < count; i++) {
-    const j = i + Math.floor(Math.random() * (innerWalls.length - i));
-    const temp = innerWalls[i];
-    innerWalls[i] = innerWalls[j];
-    innerWalls[j] = temp;
-    // 打通
-    m[innerWalls[i].y][innerWalls[i].x] = 0;
-  }
-}
-
-// ============================================================
-// 生成完整迷宫
-// ============================================================
-function generateMaze() {
-  const m = generatePerfectMaze();
-  addExtraPassages(m);
-  // 确保起点和终点是通道
+  // 为确保安全，再次标记起点终点为通道
   m[1][1] = 0;
   m[MAZE_SIZE - 2][MAZE_SIZE - 2] = 0;
+
   return m;
 }
 
@@ -136,7 +407,7 @@ function manhattanDistance(x1, y1, x2, y2) {
 }
 
 // ============================================================
-// 绘制迷宫
+// 绘制迷宫（迷雾系统：玩家曼哈顿距离 > 3 的格子涂黑）
 // ============================================================
 function drawMaze() {
   const width = MAZE_SIZE * CELL_SIZE;

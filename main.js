@@ -8,7 +8,7 @@ function createWindow() {
     width: 900,
     height: 800,
     resizable: false,
-    title: '盲径寻途',
+    title: 'Maze in the Fog',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

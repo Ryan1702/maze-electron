@@ -1,6 +1,6 @@
 {
   "name": "maze-electron",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "",
   "main": "main.js",
   "scripts": {
@@ -10,7 +10,7 @@
   },
   "build": {
     "appId": "com.ryan1702.maze-electron",
-    "productName": "盲径寻途",
+    "productName": "Maze in the Fog",
     "directories": {
       "output": "dist"
     },
