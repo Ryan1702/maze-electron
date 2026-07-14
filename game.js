@@ -2,7 +2,7 @@
 // 游戏常量
 // ============================================================
 const MAZE_SIZE = 41;       // 必须是奇数
-const CELL_SIZE = 15;       // 每格像素大小
+const CELL_SIZE = 16;       // 每格像素大小
 const FOG_RADIUS = 3;       // 视野半径（曼哈顿距离）
 const MOVE_COOLDOWN = 120;  // 移动冷却时间（毫秒）
 
@@ -407,88 +407,114 @@ function manhattanDistance(x1, y1, x2, y2) {
 }
 
 // ============================================================
-// 绘制迷宫（迷雾系统：玩家曼哈顿距离 > 3 的格子涂黑）
+// 绘制迷宫（迷雾系统 + 线条风格墙壁）
+//
+// 线条迷宫风格：
+//   - 画布底色为深色通道 (#1a1a1a)
+//   - 墙只占格子之间约 2px 的亮色细线 (#aaa)
+//   - 以通道格为中心：每个通道格检查四边，遇到墙或边界就画墙线
+//   - 外圈边界始终画完整的闭合墙线框
+//   - 迷雾：曼哈顿距离 > 3 的格子整格涂黑
+//   - 玩家 / 起点 / 终点以圆形标记绘制
 // ============================================================
 function drawMaze() {
+  const WALL_COLOR = '#aaa';
+  const WALL_WIDTH = 2;
+  const FLOOR_COLOR = '#1a1a1a';
+
   const width = MAZE_SIZE * CELL_SIZE;
   const height = MAZE_SIZE * CELL_SIZE;
   canvas.width = width;
   canvas.height = height;
 
-  // 先清空
-  ctx.clearRect(0, 0, width, height);
+  // 1. 整个画布填充通道底色
+  ctx.fillStyle = FLOOR_COLOR;
+  ctx.fillRect(0, 0, width, height);
 
-  // 遍历所有格，应用迷雾系统
+  // 2. 先画迷宫最外圈边界（始终可见的闭合矩形框）
+  ctx.strokeStyle = WALL_COLOR;
+  ctx.lineWidth = WALL_WIDTH;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.rect(0, 0, width, height);
+  ctx.stroke();
+
+  // 3. 迷雾覆盖：超出视野的格子整格涂黑
   for (let y = 0; y < MAZE_SIZE; y++) {
     for (let x = 0; x < MAZE_SIZE; x++) {
       const dist = manhattanDistance(x, y, playerX, playerY);
-      const px = x * CELL_SIZE;
-      const py = y * CELL_SIZE;
-
       if (dist > FOG_RADIUS) {
-        // 迷雾：纯黑
         ctx.fillStyle = '#000';
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-      } else {
-        // 可见区域：正常绘制
-        if (maze[y][x] === 1) {
-          // 墙壁：深灰色
-          ctx.fillStyle = '#333';
-          ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        } else {
-          // 通道：浅灰色
-          ctx.fillStyle = '#aaa';
-          ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        }
+        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
       }
     }
   }
 
-  // 绘制终点（红色）- 如果在视野内才显示
+  // 4. 在可见区域内绘制内部墙线
+  // 以通道格为基准：通道格检查四边，相邻是墙(1)则在该边画线
+  ctx.strokeStyle = WALL_COLOR;
+  ctx.lineWidth = WALL_WIDTH;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+
+  for (let y = 0; y < MAZE_SIZE; y++) {
+    for (let x = 0; x < MAZE_SIZE; x++) {
+      const dist = manhattanDistance(x, y, playerX, playerY);
+      if (dist > FOG_RADIUS) continue;
+
+      // 只处理通道格：通道格检查四个方向是否遇墙
+      if (maze[y][x] !== 0) continue;
+
+      const px = x * CELL_SIZE;
+      const py = y * CELL_SIZE;
+
+      // 上边：上方是墙或边界
+      if (y > 0 && maze[y - 1][x] === 1) {
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + CELL_SIZE, py);
+      }
+      // 下边：下方是墙或边界
+      if (y < MAZE_SIZE - 1 && maze[y + 1][x] === 1) {
+        ctx.moveTo(px, py + CELL_SIZE);
+        ctx.lineTo(px + CELL_SIZE, py + CELL_SIZE);
+      }
+      // 左边：左方是墙或边界
+      if (x > 0 && maze[y][x - 1] === 1) {
+        ctx.moveTo(px, py);
+        ctx.lineTo(px, py + CELL_SIZE);
+      }
+      // 右边：右方是墙或边界
+      if (x < MAZE_SIZE - 1 && maze[y][x + 1] === 1) {
+        ctx.moveTo(px + CELL_SIZE, py);
+        ctx.lineTo(px + CELL_SIZE, py + CELL_SIZE);
+      }
+    }
+  }
+  ctx.stroke();
+
+  // 5. 绘制终点（红色圆点）- 只在视野内可见
   const goalX = MAZE_SIZE - 2;
   const goalY = MAZE_SIZE - 2;
   if (manhattanDistance(goalX, goalY, playerX, playerY) <= FOG_RADIUS) {
-    ctx.fillStyle = '#f00';
-    ctx.fillRect(goalX * CELL_SIZE, goalY * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+    drawCircle(goalX, goalY, '#f00', CELL_SIZE * 0.35);
   }
 
-  // 绘制起点（绿色）- 始终在视野内
-  ctx.fillStyle = '#0f0';
-  ctx.fillRect(1 * CELL_SIZE, 1 * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+  // 6. 绘制起点（绿色圆点）- 始终在视野内
+  drawCircle(1, 1, '#0f0', CELL_SIZE * 0.35);
 
-  // 绘制玩家（黄色方块，稍小一些，带圆角）
-  const playerSize = CELL_SIZE - 4;
-  const playerOffset = (CELL_SIZE - playerSize) / 2;
-  const playerPx = playerX * CELL_SIZE + playerOffset;
-  const playerPy = playerY * CELL_SIZE + playerOffset;
-  ctx.fillStyle = '#ff0';
-
-  // 使用 roundRect 绘制圆角矩形（如果支持）
-  if (ctx.roundRect) {
-    ctx.beginPath();
-    ctx.roundRect(playerPx, playerPy, playerSize, playerSize, 3);
-    ctx.fill();
-  } else {
-    // 手动绘制圆角矩形
-    drawRoundRect(ctx, playerPx, playerPy, playerSize, playerSize, 3);
-  }
+  // 7. 绘制玩家（黄色圆点，稍大）
+  drawCircle(playerX, playerY, '#ff0', CELL_SIZE * 0.4);
 }
 
 // ============================================================
-// 手动绘制圆角矩形（兼容不支持 roundRect 的浏览器）
+// 在指定格子中心绘制实心圆
 // ============================================================
-function drawRoundRect(ctx, x, y, w, h, r) {
+function drawCircle(gridX, gridY, color, radius) {
+  const cx = gridX * CELL_SIZE + CELL_SIZE / 2;
+  const cy = gridY * CELL_SIZE + CELL_SIZE / 2;
+  ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.arcTo(x + w, y, x + w, y + r, r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
-  ctx.lineTo(x + r, y + h);
-  ctx.arcTo(x, y + h, x, y + h - r, r);
-  ctx.lineTo(x, y + r);
-  ctx.arcTo(x, y, x + r, y, r);
-  ctx.closePath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
   ctx.fill();
 }
 

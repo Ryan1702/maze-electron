@@ -5,8 +5,8 @@ let mainWindow;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 800,
+    width: 880,
+    height: 780,
     resizable: false,
     title: 'Maze in the Fog',
     webPreferences: {
